@@ -1456,3 +1456,68 @@ class TestFailureHint:
     def test_falls_back_when_no_http_error_was_seen(self):
         hint = _failure_hint(["Measuring latency using mode: generation..."])
         assert "Check endpoint authentication" in hint
+
+
+class TestRoleChunkGuard:
+    """Guard against llama-benchy's role-only-first-chunk est_ppt collapse.
+
+    OpenAI-faithful servers (TensorFold, oMLX, mlx-serve) emit a choices chunk
+    with delta {"role": "assistant"} before prefill has run. llama-benchy
+    <0.4.2 counted it as the first response, so est_ppt measured the socket
+    round-trip and pp_throughput inflated by orders of magnitude. The parser
+    must rewrite such rows from e2e_ttft and mark them estimated.
+    """
+
+    @staticmethod
+    def _entry(
+        pp_tps, est_ppt, e2e_ttft, *, concurrency=1, depth=0, pp_size=2048, is_ctx_prefill=False
+    ):
+        return {
+            "concurrency": concurrency,
+            "context_size": depth,
+            "prompt_size": pp_size,
+            "response_size": 32,
+            "is_context_prefill_phase": is_ctx_prefill,
+            "pp_throughput": {"mean": pp_tps},
+            "pp_req_throughput": {"mean": pp_tps},
+            "tg_throughput": {"mean": 50.0},
+            "tg_req_throughput": {"mean": 50.0},
+            "ttfr": {"mean": est_ppt + 2.0},
+            "est_ppt": {"mean": est_ppt},
+            "e2e_ttft": {"mean": e2e_ttft},
+        }
+
+    def test_tensorfold_shape_is_rewritten_and_marked(self):
+        # The live TensorFold shape: 2048 tokens claimed at 847,691 t/s from a
+        # 2.4 ms est_ppt, while the first token arrived after 2,717 ms.
+        sample = _parse_benchmark_entry(self._entry(847_691.0, 2.4, 2_717.0))
+        assert sample.pp_estimated is True
+        assert sample.pp_tps == pytest.approx(2048 / 2.717, rel=1e-6)
+        assert sample.total_ms > 0
+
+    def test_honest_vllm_row_untouched(self):
+        sample = _parse_benchmark_entry(self._entry(987.1, 2074.8, 2076.0))
+        assert sample.pp_estimated is False
+        assert sample.pp_tps == pytest.approx(987.1)
+
+    def test_honest_fast_prefill_row_untouched(self):
+        # A genuinely fast engine (10k t/s) with consistent timings stays as is.
+        sample = _parse_benchmark_entry(self._entry(10_000.0, 204.8, 206.0))
+        assert sample.pp_estimated is False
+        assert sample.pp_tps == pytest.approx(10_000.0)
+
+    def test_concurrent_rows_not_rewritten(self):
+        # llama-benchy's batch formula uses content timestamps and is not
+        # affected by the role chunk; the guard leaves c>1 rows alone.
+        sample = _parse_benchmark_entry(self._entry(900_000.0, 2.2, 2_700.0, concurrency=2))
+        assert sample.pp_estimated is False
+        assert sample.pp_tps == pytest.approx(900_000.0)
+
+    def test_ctx_prefill_phase_counts_depth_only(self):
+        # In the context-prefill phase the request prefills the depth; the
+        # user message is a tiny probe.
+        sample = _parse_benchmark_entry(
+            self._entry(700_000.0, 2.0, 2_740.0, depth=4096, is_ctx_prefill=True)
+        )
+        assert sample.pp_estimated is True
+        assert sample.pp_tps == pytest.approx(4096 / 2.740, rel=1e-6)

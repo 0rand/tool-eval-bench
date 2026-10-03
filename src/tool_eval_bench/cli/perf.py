@@ -299,7 +299,7 @@ def run_llama_benchy(
             table.add_row(
                 lbl,
                 f"c{s.concurrency}",
-                f"{s.pp_tps:,.0f}",
+                f"{s.pp_tps:,.0f}*" if s.pp_estimated else f"{s.pp_tps:,.0f}",
                 f"{s.tg_tps:,.1f}",
                 f"{s.ttft_ms:,.0f}",
                 f"{s.total_ms:,.0f}",
@@ -307,6 +307,13 @@ def run_llama_benchy(
             )
 
         console.print(table)
+
+        if any(s.pp_estimated for s in ok_samples):
+            console.print(
+                "  [dim]* prefill derived from e2e_ttft — llama-benchy's est_ppt was "
+                "implausible on this server (role-only first SSE chunk; "
+                "eugr/llama-benchy#33).[/]"
+            )
 
     if ok_samples and ok_samples[0].calibration_confidence == "llama-benchy":
         console.print(

@@ -300,6 +300,29 @@ def _parse_benchmark_entry(entry: dict[str, Any]) -> ThroughputSample:
     est_ppt_ms = _stat_mean(entry.get("est_ppt", {}))
     e2e_ttft_ms = _stat_mean(entry.get("e2e_ttft", {}))
 
+    # Guard: llama-benchy <0.4.2 (eugr/llama-benchy#33) sets first_response_ts
+    # on any choices chunk.  OpenAI-faithful servers (TensorFold, oMLX,
+    # mlx-serve, ...) emit a role-only priming chunk the instant the stream
+    # opens — before prefill has run — so est_ppt collapses to the socket
+    # round-trip and pp_throughput inflates by orders of magnitude (observed:
+    # 847,691 t/s for a 2048-token prefill that took 2.7 s).  Two conditions
+    # must both hold before anything is rewritten, so honest measurements are
+    # never touched: the claimed rate must exceed anything single-stream
+    # hardware can prefill (50k t/s), and est_ppt must be less than half of
+    # e2e_ttft (a prefill cannot be faster than its own first token allows).
+    # The rewrite derives the prefill from e2e_ttft over the whole prompt the
+    # request actually prefilled (depth + pp on a standard run) and marks the
+    # row estimated.
+    pp_estimated = False
+    total_prefill_tokens = depth if is_ctx_prefill else depth + pp_tokens
+    if concurrency == 1 and total_prefill_tokens > 0 and e2e_ttft_ms > 0:
+        honest_pp_tps = total_prefill_tokens / (e2e_ttft_ms / 1000)
+        if pp_tps > 50_000 and est_ppt_ms < e2e_ttft_ms * 0.5:
+            pp_tps = honest_pp_tps
+            pp_req_tps = honest_pp_tps
+            est_ppt_ms = e2e_ttft_ms
+            pp_estimated = True
+
     # For concurrent runs, use per-request throughput for the sample's
     # pp_tps/tg_tps (total throughput is in the aggregated fields).
     # For single-stream, req and total are the same.
@@ -330,6 +353,7 @@ def _parse_benchmark_entry(entry: dict[str, Any]) -> ThroughputSample:
         requested_pp=req_pp,
         requested_depth=depth,
         calibration_confidence="llama-benchy",
+        pp_estimated=pp_estimated,
     )
 
 
