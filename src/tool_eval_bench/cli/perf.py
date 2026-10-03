@@ -12,6 +12,8 @@ from typing import Any
 
 from rich.console import Console
 
+from tool_eval_bench.storage.reports._common import PP_ESTIMATED_NOTE, sample_pp_estimated
+
 
 def _measurement_run_key(event: dict[str, Any]) -> tuple[Any, ...]:
     """Stable key for one llama-benchy measurement run (not one HTTP request)."""
@@ -299,7 +301,7 @@ def run_llama_benchy(
             table.add_row(
                 lbl,
                 f"c{s.concurrency}",
-                f"{s.pp_tps:,.0f}",
+                f"{s.pp_tps:,.0f}*" if sample_pp_estimated(s) else f"{s.pp_tps:,.0f}",
                 f"{s.tg_tps:,.1f}",
                 f"{s.ttft_ms:,.0f}",
                 f"{s.total_ms:,.0f}",
@@ -307,6 +309,9 @@ def run_llama_benchy(
             )
 
         console.print(table)
+
+        if any(sample_pp_estimated(s) for s in ok_samples):
+            console.print(f"  [dim]* {PP_ESTIMATED_NOTE}[/]")
 
     if ok_samples and ok_samples[0].calibration_confidence == "llama-benchy":
         console.print(

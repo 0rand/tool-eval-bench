@@ -726,3 +726,31 @@ class TestPrintFinalReportThroughput:
         assert "Single:" in output  # concurrency=1 renders as "Single:"
         assert "c2:" in output
         assert "c4:" in output
+
+    def test_marks_estimated_single_stream_prefill(self) -> None:
+        from unittest.mock import MagicMock
+
+        from tool_eval_bench.storage.reports._common import PP_ESTIMATED_NOTE
+
+        summary = _make_summary()
+        console = Console(file=StringIO(), width=200, no_color=True)
+        estimated = MagicMock(
+            pp_tps=754.0,
+            tg_tps=65.4,
+            ttft_ms=2717.0,
+            concurrency=1,
+            error=None,
+            pp_estimated=True,
+        )
+        print_final_report(
+            console,
+            "test-model",
+            summary,
+            elapsed=120.5,
+            throughput_samples=[estimated],
+        )
+        output = console.file.getvalue()
+        assert "754* pp t/s" in output
+        # The panel wraps the note, so match the phrase that stays on one line.
+        assert "role-only first SSE chunk" in output
+        assert PP_ESTIMATED_NOTE.split(" the signature of ", maxsplit=1)[0] in output
