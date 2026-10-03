@@ -1,0 +1,1 @@
+Rewritten prefill rows now divide by the tokens the request actually prefilled (prompt + depth), matching llama-benchy's own numerator, instead of the prompt size the row label names. A pp1024 @ d8192 row on TensorFold rewrote to 200 t/s while the same request run at depth 0 measures ~1,800 t/s; the footnote names the full quantity.

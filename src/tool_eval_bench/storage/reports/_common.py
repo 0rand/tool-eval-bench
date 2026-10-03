@@ -235,10 +235,10 @@ def _render_run_context(ctx: RunContext) -> list[str]:
 # Prose shared by the CLI table and every Markdown writer. The guard only
 # fires for the round-trip signature, so the note can name that cause.
 PP_ESTIMATED_NOTE = (
-    "prefill derived from e2e_ttft over the tokens this row labels. "
-    "est_ppt was a few milliseconds while that token count over e2e_ttft was "
-    "an order of magnitude slower, the signature of llama-benchy counting a "
-    "role-only first SSE chunk (eugr/llama-benchy#33)."
+    "prefill derived from e2e_ttft over the tokens the request prefilled "
+    "(prompt + depth). est_ppt was a few milliseconds while that token count "
+    "over e2e_ttft was an order of magnitude slower, the signature of "
+    "llama-benchy counting a role-only first SSE chunk (eugr/llama-benchy#33)."
 )
 
 

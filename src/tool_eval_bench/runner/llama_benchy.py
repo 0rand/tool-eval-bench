@@ -343,18 +343,25 @@ def _role_chunk_prefill_inflated(
 
 
 def _labeled_prefill_tokens(is_ctx_prefill: bool, depth: int, pp_tokens: int) -> int:
-    """Return the token count the published row attributes to this prefill rate.
+    """Return the token count this row's prefill rate should be divided by.
 
     llama-benchy defines ``context_size`` as the prefix, ``prompt_size`` as the
     prompt, and ``is_context_prefill_phase`` as the context-load step. That
     step's numerator is the depth (``ctx_pp @ d{context_size}``); this tool
     labels it ``pp{depth}``. Every other row is labeled ``pp{prompt_size}``.
-    llama-benchy divides ``prompt_size + context_size`` on a standard run with
-    depth above 0, and ``prompt_size`` alone on a prefix-cached follow-up, while
-    both labels still say ``pp{prompt_size}``. The rewritten rate uses the
-    labeled quantity, so the number and the label name the same tokens.
+
+    The rewrite must divide by the tokens the request actually prefilled,
+    which is what llama-benchy's own numerator is (runner.py: the standard
+    branch passes ``expected_pp + expected_ctx``, the prefix-cached follow-up
+    ``expected_pp`` alone, the context-load step ``expected_ctx``). The label
+    names only the prompt, so a rewritten ``pp1024 @ d8192`` row is
+    ``(1024 + 8192) / e2e_ttft`` — 1,798 t/s for the live 5,127 ms sample —
+    not ``1024 / e2e_ttft`` (200 t/s), which credits a 9,216-token prefill
+    with only its prompt. tool-eval-bench always runs llama-benchy with
+    ``--no-cache``, so the standard branch is the one whose rows get rewritten;
+    its numerator is always depth + prompt.
     """
-    return depth if is_ctx_prefill else pp_tokens
+    return depth if is_ctx_prefill else depth + pp_tokens
 
 
 def _parse_benchmark_entry(entry: dict[str, Any]) -> ThroughputSample:
