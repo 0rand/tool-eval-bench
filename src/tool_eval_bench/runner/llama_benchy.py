@@ -288,11 +288,19 @@ def _build_command(
 # about 2–6 ms) — and pp_throughput = tokens / est_ppt inflates by orders of
 # magnitude. e2e_ttft waits for the first content or reasoning chunk.
 #
-# 10 ms sits above that round-trip band and below a real prefill, which is
-# tens of milliseconds. An absolute t/s cutoff does not: 2048 tokens at a
-# 40 ms est_ppt is about 51k t/s and is an honest prefill, while 64 tokens
-# over a 2.4 ms est_ppt is only about 27k t/s and is the same bug.
-_ROLE_CHUNK_MAX_EST_PPT_MS = 10.0
+# The priming chunk's residual is not a constant round-trip: servers that
+# tokenize the request before flushing it (mlx-serve measured live) put the
+# whole input's preprocessing into est_ppt, so it grows with depth — 2.4 ms
+# at d0 on TensorFold, 10.9 ms at d16384 on mlx-serve, which slipped past a
+# fixed 10 ms ceiling and published 1,697,429 t/s. Bound it by what
+# preprocessing can cost: tokenizers run at hundreds of thousands of tokens
+# per second, so 0.005 ms per input token (200k t/s) is two orders below the
+# fastest honest prefill measured on this hardware (~2k t/s). An absolute
+# t/s cutoff does not work either way: 2048 tokens at a 40 ms est_ppt is
+# about 51k t/s and is an honest prefill, while 64 tokens over a 2.4 ms
+# est_ppt is only about 27k t/s and is the same bug.
+_ROLE_CHUNK_PREPROCESS_MS_PER_TOKEN = 0.005
+_ROLE_CHUNK_MAX_EST_PPT_MS = 10.0  # the floor of the bound, for depth-0 rows
 # Claimed t/s divided by the same tokens over e2e_ttft equals
 # e2e_ttft / est_ppt. The live case is about 1,100×. One order of magnitude
 # excludes a fast prefill whose e2e_ttft is larger only because of queue
@@ -300,7 +308,14 @@ _ROLE_CHUNK_MAX_EST_PPT_MS = 10.0
 _ROLE_CHUNK_MIN_E2E_RATIO = 10.0
 
 
-def _role_chunk_prefill_inflated(concurrency: int, est_ppt_ms: float, e2e_ttft_ms: float) -> bool:
+def _role_chunk_prefill_inflated(
+    concurrency: int,
+    est_ppt_ms: float,
+    e2e_ttft_ms: float,
+    *,
+    total_input_tokens: int = 0,
+    pp_tps: float = 0.0,
+) -> bool:
     """Return whether a single-stream row has the role-chunk timing signature.
 
     Concurrent ``pp_throughput`` is llama-benchy's batch formula: total prompt
@@ -308,10 +323,21 @@ def _role_chunk_prefill_inflated(concurrency: int, est_ppt_ms: float, e2e_ttft_m
     is the first content or reasoning chunk, so the role-only chunk does not
     enter it. ``pp_req_throughput`` can still be inflated; the sample displays
     the batch total for concurrency above 1 and leaves that row alone.
+
+    A zero est_ppt (ttfr at or under the measured latency) is the degenerate
+    shape of the same bug: benchy drops the sample from ``pp_throughput``
+    entirely and the row publishes 0 t/s while e2e_ttft shows the prefill
+    really took seconds. That row is estimated from e2e_ttft too.
     """
-    if concurrency != 1 or est_ppt_ms <= 0 or e2e_ttft_ms <= 0:
+    if concurrency != 1 or e2e_ttft_ms <= 0:
         return False
-    if est_ppt_ms >= _ROLE_CHUNK_MAX_EST_PPT_MS:
+    if est_ppt_ms <= 0:
+        return pp_tps <= 0
+    cap = max(
+        _ROLE_CHUNK_MAX_EST_PPT_MS,
+        total_input_tokens * _ROLE_CHUNK_PREPROCESS_MS_PER_TOKEN,
+    )
+    if est_ppt_ms >= cap:
         return False
     return (e2e_ttft_ms / est_ppt_ms) >= _ROLE_CHUNK_MIN_E2E_RATIO
 
@@ -350,7 +376,13 @@ def _parse_benchmark_entry(entry: dict[str, Any]) -> ThroughputSample:
     e2e_ttft_ms = _stat_mean(entry.get("e2e_ttft", {}))
 
     pp_estimated = False
-    if _role_chunk_prefill_inflated(concurrency, est_ppt_ms, e2e_ttft_ms):
+    if _role_chunk_prefill_inflated(
+        concurrency,
+        est_ppt_ms,
+        e2e_ttft_ms,
+        total_input_tokens=depth + pp_tokens,
+        pp_tps=pp_tps,
+    ):
         labeled_tokens = _labeled_prefill_tokens(is_ctx_prefill, depth, pp_tokens)
         if labeled_tokens > 0:
             honest_pp_tps = labeled_tokens / (e2e_ttft_ms / 1000.0)

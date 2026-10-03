@@ -1601,3 +1601,36 @@ class TestRoleChunkGuard:
         sample = _parse_benchmark_entry(self._entry(800_000.0, 2.4, 2_717.0, pp_size=0))
         assert sample.pp_estimated is False
         assert sample.pp_tps == pytest.approx(800_000.0)
+
+    def test_deep_depth_role_chunk_above_fixed_ceiling_is_rewritten(self):
+        # Live mlx-serve escape (run 2cdf03f8): at depth 16384 the server
+        # tokenizes the whole input before flushing the role chunk, so est_ppt
+        # was 10.87 ms — above a fixed 10 ms ceiling — and the row published
+        # 1,697,429 t/s while e2e_ttft was 12,079 ms. The bound must scale
+        # with the input size, not stay a constant round-trip.
+        claimed = 1_697_429.0
+        sample = _parse_benchmark_entry(
+            self._entry(claimed, 10.87, 12_079.0, depth=16384, pp_size=1024)
+        )
+        assert sample.pp_estimated is True
+        assert sample.pp_tps == pytest.approx(1024 / 12.079, rel=1e-6)
+
+    def test_zero_est_ppt_row_is_estimated_from_e2e_ttft(self):
+        # Live mlx-serve degenerate shape (same run): ttfr at or under the
+        # measured latency zeroes est_ppt, benchy drops the sample, and the
+        # row published 0 t/s while e2e_ttft showed a 3.1 s prefill.
+        sample = _parse_benchmark_entry(self._entry(0.0, 0.0, 3_092.0, depth=1024, pp_size=1024))
+        assert sample.pp_estimated is True
+        assert sample.pp_tps == pytest.approx(1024 / 3.092, rel=1e-6)
+        assert sample.total_ms > 0
+
+    def test_honest_deep_prefill_with_slow_tokenizer_untouched(self):
+        # A real prefill whose est_ppt includes tokenizer work at depth:
+        # est_ppt 40 ms over 17,408 input tokens is honest preprocessing,
+        # and e2e_ttft 100 ms is queue — ratio 2.5, nowhere near 10x.
+        claimed = 2048 / 0.040
+        sample = _parse_benchmark_entry(
+            self._entry(claimed, 40.0, 100.0, depth=16384, pp_size=2048)
+        )
+        assert sample.pp_estimated is False
+        assert sample.pp_tps == pytest.approx(claimed)
