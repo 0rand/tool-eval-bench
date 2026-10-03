@@ -359,11 +359,9 @@ def _parse_benchmark_entry(entry: dict[str, Any]) -> ThroughputSample:
             est_ppt_ms = e2e_ttft_ms
             pp_estimated = True
 
-    # For concurrent runs, use per-request throughput for the sample's
-    # pp_tps/tg_tps (total throughput is in the aggregated fields).
-    # For single-stream, req and total are the same.
+    # Concurrent rows display the batch total, which is what llama-benchy's
+    # table shows. Single-stream req and total are the same value.
     if concurrency > 1:
-        # Use total throughput for display (matches llama-benchy table)
         display_pp = pp_tps
         display_tg = tg_tps
     else:
