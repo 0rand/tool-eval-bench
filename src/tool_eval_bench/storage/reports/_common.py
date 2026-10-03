@@ -230,3 +230,40 @@ def _render_run_context(ctx: RunContext) -> list[str]:
         )
 
     return md
+
+
+# Prose shared by the CLI table and every Markdown writer. The guard only
+# fires for the round-trip signature, so the note can name that cause.
+PP_ESTIMATED_NOTE = (
+    "prefill derived from e2e_ttft over the tokens this row labels. "
+    "est_ppt was a few milliseconds while that token count over e2e_ttft was "
+    "an order of magnitude slower, the signature of llama-benchy counting a "
+    "role-only first SSE chunk (eugr/llama-benchy#33)."
+)
+
+
+def sample_pp_estimated(sample: Any) -> bool:
+    """Return whether this sample's prefill rate was derived from e2e_ttft.
+
+    A missing attribute is a measured row. The identity check keeps test
+    doubles that invent attributes from looking estimated.
+    """
+    return getattr(sample, "pp_estimated", False) is True
+
+
+def append_benchy_throughput_rows(md: list[str], ok_samples: list[Any]) -> None:
+    """Append prefill/decode table rows and the estimated-prefill footnote."""
+    for sample in ok_samples:
+        conc_label = f" c{sample.concurrency}" if sample.concurrency > 1 else ""
+        label = f"pp{sample.label_pp} tg{sample.tg_tokens} @ d{sample.label_depth}{conc_label}"
+        pp_label = f"{sample.pp_tps:,.0f}"
+        if sample_pp_estimated(sample):
+            pp_label += "*"
+        md.append(
+            f"| {label} | {pp_label} | {sample.tg_tps:,.1f} "
+            f"| {sample.ttft_ms:,.0f} | {sample.total_ms:,.0f} "
+            f"| {sample.pp_tokens}+{sample.tg_tokens} |"
+        )
+    if any(sample_pp_estimated(sample) for sample in ok_samples):
+        md.append("")
+        md.append(f"\\* {PP_ESTIMATED_NOTE}")

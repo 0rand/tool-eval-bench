@@ -1465,13 +1465,25 @@ class TestRoleChunkGuard:
     with delta {"role": "assistant"} before prefill has run. llama-benchy
     <0.4.2 counted it as the first response, so est_ppt measured the socket
     round-trip and pp_throughput inflated by orders of magnitude. The parser
-    must rewrite such rows from e2e_ttft and mark them estimated.
+    rewrites a single-stream row only when est_ppt is that round-trip and
+    e2e_ttft is an order of magnitude longer, and the replacement rate uses
+    the tokens the row labels.
     """
 
     @staticmethod
     def _entry(
-        pp_tps, est_ppt, e2e_ttft, *, concurrency=1, depth=0, pp_size=2048, is_ctx_prefill=False
+        pp_tps,
+        est_ppt,
+        e2e_ttft,
+        *,
+        concurrency=1,
+        depth=0,
+        pp_size=2048,
+        is_ctx_prefill=False,
+        pp_req_tps=None,
     ):
+        if pp_req_tps is None:
+            pp_req_tps = pp_tps
         return {
             "concurrency": concurrency,
             "context_size": depth,
@@ -1479,7 +1491,7 @@ class TestRoleChunkGuard:
             "response_size": 32,
             "is_context_prefill_phase": is_ctx_prefill,
             "pp_throughput": {"mean": pp_tps},
-            "pp_req_throughput": {"mean": pp_tps},
+            "pp_req_throughput": {"mean": pp_req_tps},
             "tg_throughput": {"mean": 50.0},
             "tg_req_throughput": {"mean": 50.0},
             "ttfr": {"mean": est_ppt + 2.0},
@@ -1492,8 +1504,28 @@ class TestRoleChunkGuard:
         # 2.4 ms est_ppt, while the first token arrived after 2,717 ms.
         sample = _parse_benchmark_entry(self._entry(847_691.0, 2.4, 2_717.0))
         assert sample.pp_estimated is True
+        assert sample.label_pp == 2048
         assert sample.pp_tps == pytest.approx(2048 / 2.717, rel=1e-6)
-        assert sample.total_ms > 0
+        # total_ms is est_ppt plus generation. Replacing est_ppt with e2e_ttft
+        # keeps total at or above the honest TTFT.
+        assert sample.ttft_ms == pytest.approx(2_717.0)
+        assert sample.total_ms == pytest.approx(2_717.0 + 32 / 50.0 * 1000)
+
+    def test_short_prompt_role_chunk_is_rewritten(self):
+        # 64 tokens over a 2.4 ms est_ppt is about 27k t/s, under any 50k
+        # cutoff, and still the round-trip signature.
+        claimed = 64 / 0.0024
+        sample = _parse_benchmark_entry(self._entry(claimed, 2.4, 2_717.0, pp_size=64))
+        assert sample.pp_estimated is True
+        assert sample.label_pp == 64
+        assert sample.pp_tps == pytest.approx(64 / 2.717, rel=1e-6)
+
+    def test_role_chunk_band_up_to_a_few_milliseconds_is_rewritten(self):
+        # The reported round-trip band is about 2–6 ms, not only the 2.4 ms
+        # live sample.
+        sample = _parse_benchmark_entry(self._entry(2048 / 0.006, 6.0, 2_717.0))
+        assert sample.pp_estimated is True
+        assert sample.pp_tps == pytest.approx(2048 / 2.717, rel=1e-6)
 
     def test_honest_vllm_row_untouched(self):
         sample = _parse_benchmark_entry(self._entry(987.1, 2074.8, 2076.0))
@@ -1501,23 +1533,71 @@ class TestRoleChunkGuard:
         assert sample.pp_tps == pytest.approx(987.1)
 
     def test_honest_fast_prefill_row_untouched(self):
-        # A genuinely fast engine (10k t/s) with consistent timings stays as is.
+        # A genuinely fast engine (10k t/s) whose est_ppt matches e2e_ttft.
         sample = _parse_benchmark_entry(self._entry(10_000.0, 204.8, 206.0))
         assert sample.pp_estimated is False
         assert sample.pp_tps == pytest.approx(10_000.0)
 
-    def test_concurrent_rows_not_rewritten(self):
-        # llama-benchy's batch formula uses content timestamps and is not
-        # affected by the role chunk; the guard leaves c>1 rows alone.
-        sample = _parse_benchmark_entry(self._entry(900_000.0, 2.2, 2_700.0, concurrency=2))
+    def test_fast_prefill_with_queue_delay_untouched(self):
+        # 2048 tokens, est_ppt 40 ms (about 51,200 t/s), e2e_ttft 100 ms.
+        # The prefill itself is real; the extra e2e time is queue, not a
+        # role chunk. A 50k cutoff plus "est_ppt < half of e2e" would rewrite it.
+        claimed = 2048 / 0.040
+        sample = _parse_benchmark_entry(self._entry(claimed, 40.0, 100.0))
         assert sample.pp_estimated is False
-        assert sample.pp_tps == pytest.approx(900_000.0)
+        assert sample.pp_tps == pytest.approx(claimed)
+
+    def test_fast_prefill_tens_of_ms_stays_measured_when_e2e_is_much_larger(self):
+        # est_ppt is a real prefill (tens of milliseconds). A large e2e_ttft
+        # does not make the role-chunk signature, even when the ratio exceeds
+        # an order of magnitude.
+        claimed = 2048 / 0.040
+        sample = _parse_benchmark_entry(self._entry(claimed, 40.0, 2_000.0))
+        assert sample.pp_estimated is False
+        assert sample.pp_tps == pytest.approx(claimed)
+
+    def test_few_milliseconds_without_an_order_of_magnitude_stays_measured(self):
+        # est_ppt is round-trip scale, but e2e_ttft / est_ppt is under 10×.
+        # That is not the inflated shape, so the claimed rate stays.
+        claimed = 2048 / 0.0024
+        sample = _parse_benchmark_entry(self._entry(claimed, 2.4, 20.0))
+        assert sample.pp_estimated is False
+        assert sample.pp_tps == pytest.approx(claimed)
+
+    def test_concurrent_rows_not_rewritten(self):
+        # concurrency > 1 pp_throughput is the batch formula: total prompt
+        # tokens / (max(first_token_ts) - min(start_ts)). first_token_ts is
+        # the first content chunk, so the role-only chunk does not enter it.
+        # pp_req_throughput is still tokens/est_ppt and can be inflated; the
+        # sample displays the batch total.
+        sample = _parse_benchmark_entry(
+            self._entry(1_500.0, 2.2, 2_700.0, concurrency=2, pp_req_tps=900_000.0)
+        )
+        assert sample.pp_estimated is False
+        assert sample.pp_tps == pytest.approx(1_500.0)
 
     def test_ctx_prefill_phase_counts_depth_only(self):
-        # In the context-prefill phase the request prefills the depth; the
-        # user message is a tiny probe.
+        # is_context_prefill_phase: llama-benchy counts context_size (the
+        # depth). The row is labeled pp{depth}. prompt_size is not added.
         sample = _parse_benchmark_entry(
-            self._entry(700_000.0, 2.0, 2_740.0, depth=4096, is_ctx_prefill=True)
+            self._entry(700_000.0, 2.0, 2_740.0, depth=4096, pp_size=2048, is_ctx_prefill=True)
         )
         assert sample.pp_estimated is True
+        assert sample.label_pp == 4096
         assert sample.pp_tps == pytest.approx(4096 / 2.740, rel=1e-6)
+
+    def test_depth_row_rate_matches_labeled_prompt_size(self):
+        # A non-context row is labeled pp{prompt_size} @ d{depth}. The
+        # rewritten rate is prompt_size / e2e_ttft, not (depth + prompt_size).
+        sample = _parse_benchmark_entry(
+            self._entry(800_000.0, 2.5, 2_500.0, depth=4096, pp_size=512)
+        )
+        assert sample.pp_estimated is True
+        assert sample.label_pp == 512
+        assert sample.depth == 4096
+        assert sample.pp_tps == pytest.approx(512 / 2.5, rel=1e-6)
+
+    def test_empty_labeled_prompt_is_not_rewritten(self):
+        sample = _parse_benchmark_entry(self._entry(800_000.0, 2.4, 2_717.0, pp_size=0))
+        assert sample.pp_estimated is False
+        assert sample.pp_tps == pytest.approx(800_000.0)

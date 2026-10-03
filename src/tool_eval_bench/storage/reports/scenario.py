@@ -25,6 +25,7 @@ from tool_eval_bench.storage.reports._common import (
     _render_held_out_note,
     _render_run_context,
     _trace_block,
+    append_benchy_throughput_rows,
     report_filename,
 )
 
@@ -302,23 +303,7 @@ def write_scenario_report(
         md.extend(["", "## Throughput Metrics", ""])
         md.append("| Test | pp t/s | tg t/s | TTFT (ms) | Total (ms) | Tokens |")
         md.append("|---|---:|---:|---:|---:|---:|")
-        for s in ok_samples:
-            conc_label = f" c{s.concurrency}" if s.concurrency > 1 else ""
-            label = f"pp{s.label_pp} tg{s.tg_tokens} @ d{s.label_depth}{conc_label}"
-            pp_label = (
-                f"{s.pp_tps:,.0f}*" if getattr(s, "pp_estimated", False) else f"{s.pp_tps:,.0f}"
-            )
-            md.append(
-                f"| {label} | {pp_label} | {s.tg_tps:,.1f} "
-                f"| {s.ttft_ms:,.0f} | {s.total_ms:,.0f} "
-                f"| {s.pp_tokens}+{s.tg_tokens} |"
-            )
-        if any(getattr(s, "pp_estimated", False) for s in ok_samples):
-            md.append("")
-            md.append(
-                "\\* prefill derived from e2e_ttft — llama-benchy's est_ppt was implausible "
-                "on this server (role-only first SSE chunk; eugr/llama-benchy#33)."
-            )
+        append_benchy_throughput_rows(md, ok_samples)
 
     diagnostic_results = [
         r for r in summary.scenario_results if r.parallel_tool_turns or r.state_checkpoints

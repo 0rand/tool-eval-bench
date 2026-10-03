@@ -286,11 +286,10 @@ class ThroughputSample:
     # Kept raw here; ``runner.speculative`` owns the typed parse.
     spec_decode_metrics: dict[str, Any] | None = None
     tensorfold_spec_metrics: dict[str, Any] | None = None
-    # True when the prefill time was derived from e2e_ttft because est_ppt was
-    # implausible (see ``_parse_benchmark_entry``): an OpenAI-faithful server
-    # emits a role-only first SSE chunk before prefill has run, so est_ppt
-    # measures the socket round-trip, not the prefill. Reports mark such rows
-    # with an asterisk.
+    # True when single-stream prefill was derived from e2e_ttft. est_ppt was a
+    # few milliseconds and an order of magnitude shorter than e2e_ttft, the
+    # signature of llama-benchy counting a role-only first SSE chunk (see
+    # ``_parse_benchmark_entry``). Reports mark such rows with an asterisk.
     pp_estimated: bool = False
 
     @property

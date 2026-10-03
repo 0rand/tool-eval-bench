@@ -306,7 +306,35 @@ class TestThroughputReport:
         assert "# Throughput Benchmark" in content
         assert "tp-model" in content
         assert "pp2048" in content
+        assert "role-only first SSE chunk" not in content
         assert path.exists()
+
+    def test_estimated_prefill_is_marked_and_footnoted(self, tmp_path):
+        from dataclasses import dataclass
+
+        from tool_eval_bench.storage.reports._common import PP_ESTIMATED_NOTE
+
+        @dataclass
+        class FakeSample:
+            pp_tps: float = 754.0
+            tg_tps: float = 65.4
+            ttft_ms: float = 2717.0
+            total_ms: float = 3357.0
+            pp_tokens: int = 2048
+            tg_tokens: int = 128
+            label_pp: int = 2048
+            label_depth: int = 0
+            concurrency: int = 1
+            error: str | None = None
+            pp_estimated: bool = True
+
+        reporter = MarkdownReporter(root=str(tmp_path))
+        path = reporter.write_throughput_report("tp_run_est", "tf-model", [FakeSample()])
+        content = path.read_text(encoding="utf-8")
+        assert "754*" in content
+        assert PP_ESTIMATED_NOTE in content
+        assert "50k" not in content
+        assert "50,000" not in content
 
     def test_throughput_report_with_errors(self, tmp_path):
         from dataclasses import dataclass

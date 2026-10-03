@@ -34,6 +34,7 @@ from tool_eval_bench.evals.scenarios import (
     ALL_DISPLAY_DETAILS,
     ALL_SCENARIOS_WITH_HARDMODE,
 )
+from tool_eval_bench.storage.reports._common import PP_ESTIMATED_NOTE, sample_pp_estimated
 
 # ---------------------------------------------------------------------------
 # Style constants
@@ -484,8 +485,9 @@ def _print_final_panel(
         if single:
             best_pp = max(single, key=lambda s: s.pp_tps)
             best_tg = max(single, key=lambda s: s.tg_tps)
+            pp_mark = "*" if sample_pp_estimated(best_pp) else ""
             content += (
-                f"\n  [dim]Single:[/]  {best_pp.pp_tps:,.0f} pp t/s  │  "
+                f"\n  [dim]Single:[/]  {best_pp.pp_tps:,.0f}{pp_mark} pp t/s  │  "
                 f"{best_tg.tg_tps:,.1f} tg t/s  │  "
                 f"TTFT {best_tg.ttft_ms:,.0f}ms"
             )
@@ -496,11 +498,14 @@ def _print_final_panel(
                 level_samples = [s for s in concurrent if s.concurrency == clevel]
                 best_pp_c = max(level_samples, key=lambda s: s.pp_tps)
                 best_tg_c = max(level_samples, key=lambda s: s.tg_tps)
+                pp_mark = "*" if sample_pp_estimated(best_pp_c) else ""
                 content += (
                     f"\n  [dim]c{clevel}:[/]      "
-                    f"{best_pp_c.pp_tps:,.0f} pp t/s  │  "
+                    f"{best_pp_c.pp_tps:,.0f}{pp_mark} pp t/s  │  "
                     f"{best_tg_c.tg_tps:,.1f} tg t/s"
                 )
+        if any(sample_pp_estimated(s) for s in ok_samples):
+            content += f"\n  [dim]* {PP_ESTIMATED_NOTE}[/]"
 
     # Scoring methodology (how the numbers are calculated)
     content += (

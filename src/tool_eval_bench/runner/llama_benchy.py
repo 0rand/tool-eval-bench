@@ -281,6 +281,55 @@ def _build_command(
 # Parse JSON output → ThroughputSample
 # ---------------------------------------------------------------------------
 
+# llama-benchy <0.4.2 (eugr/llama-benchy#33) stamps first_response_ts on any
+# choices chunk. A role-only priming chunk arrives when the socket opens,
+# before prefill, so est_ppt collapses to the residual round-trip — a few
+# milliseconds (the live TensorFold row was 2.4 ms; the reported band is
+# about 2–6 ms) — and pp_throughput = tokens / est_ppt inflates by orders of
+# magnitude. e2e_ttft waits for the first content or reasoning chunk.
+#
+# 10 ms sits above that round-trip band and below a real prefill, which is
+# tens of milliseconds. An absolute t/s cutoff does not: 2048 tokens at a
+# 40 ms est_ppt is about 51k t/s and is an honest prefill, while 64 tokens
+# over a 2.4 ms est_ppt is only about 27k t/s and is the same bug.
+_ROLE_CHUNK_MAX_EST_PPT_MS = 10.0
+# Claimed t/s divided by the same tokens over e2e_ttft equals
+# e2e_ttft / est_ppt. The live case is about 1,100×. One order of magnitude
+# excludes a fast prefill whose e2e_ttft is larger only because of queue
+# (about 2–3×).
+_ROLE_CHUNK_MIN_E2E_RATIO = 10.0
+
+
+def _role_chunk_prefill_inflated(concurrency: int, est_ppt_ms: float, e2e_ttft_ms: float) -> bool:
+    """Return whether a single-stream row has the role-chunk timing signature.
+
+    Concurrent ``pp_throughput`` is llama-benchy's batch formula: total prompt
+    tokens divided by ``max(first_token_ts) - min(start_ts)``. ``first_token_ts``
+    is the first content or reasoning chunk, so the role-only chunk does not
+    enter it. ``pp_req_throughput`` can still be inflated; the sample displays
+    the batch total for concurrency above 1 and leaves that row alone.
+    """
+    if concurrency != 1 or est_ppt_ms <= 0 or e2e_ttft_ms <= 0:
+        return False
+    if est_ppt_ms >= _ROLE_CHUNK_MAX_EST_PPT_MS:
+        return False
+    return (e2e_ttft_ms / est_ppt_ms) >= _ROLE_CHUNK_MIN_E2E_RATIO
+
+
+def _labeled_prefill_tokens(is_ctx_prefill: bool, depth: int, pp_tokens: int) -> int:
+    """Return the token count the published row attributes to this prefill rate.
+
+    llama-benchy defines ``context_size`` as the prefix, ``prompt_size`` as the
+    prompt, and ``is_context_prefill_phase`` as the context-load step. That
+    step's numerator is the depth (``ctx_pp @ d{context_size}``); this tool
+    labels it ``pp{depth}``. Every other row is labeled ``pp{prompt_size}``.
+    llama-benchy divides ``prompt_size + context_size`` on a standard run with
+    depth above 0, and ``prompt_size`` alone on a prefix-cached follow-up, while
+    both labels still say ``pp{prompt_size}``. The rewritten rate uses the
+    labeled quantity, so the number and the label name the same tokens.
+    """
+    return depth if is_ctx_prefill else pp_tokens
+
 
 def _parse_benchmark_entry(entry: dict[str, Any]) -> ThroughputSample:
     """Convert a single llama-benchy benchmark entry to a ThroughputSample."""
@@ -300,24 +349,11 @@ def _parse_benchmark_entry(entry: dict[str, Any]) -> ThroughputSample:
     est_ppt_ms = _stat_mean(entry.get("est_ppt", {}))
     e2e_ttft_ms = _stat_mean(entry.get("e2e_ttft", {}))
 
-    # Guard: llama-benchy <0.4.2 (eugr/llama-benchy#33) sets first_response_ts
-    # on any choices chunk.  OpenAI-faithful servers (TensorFold, oMLX,
-    # mlx-serve, ...) emit a role-only priming chunk the instant the stream
-    # opens — before prefill has run — so est_ppt collapses to the socket
-    # round-trip and pp_throughput inflates by orders of magnitude (observed:
-    # 847,691 t/s for a 2048-token prefill that took 2.7 s).  Two conditions
-    # must both hold before anything is rewritten, so honest measurements are
-    # never touched: the claimed rate must exceed anything single-stream
-    # hardware can prefill (50k t/s), and est_ppt must be less than half of
-    # e2e_ttft (a prefill cannot be faster than its own first token allows).
-    # The rewrite derives the prefill from e2e_ttft over the whole prompt the
-    # request actually prefilled (depth + pp on a standard run) and marks the
-    # row estimated.
     pp_estimated = False
-    total_prefill_tokens = depth if is_ctx_prefill else depth + pp_tokens
-    if concurrency == 1 and total_prefill_tokens > 0 and e2e_ttft_ms > 0:
-        honest_pp_tps = total_prefill_tokens / (e2e_ttft_ms / 1000)
-        if pp_tps > 50_000 and est_ppt_ms < e2e_ttft_ms * 0.5:
+    if _role_chunk_prefill_inflated(concurrency, est_ppt_ms, e2e_ttft_ms):
+        labeled_tokens = _labeled_prefill_tokens(is_ctx_prefill, depth, pp_tokens)
+        if labeled_tokens > 0:
+            honest_pp_tps = labeled_tokens / (e2e_ttft_ms / 1000.0)
             pp_tps = honest_pp_tps
             pp_req_tps = honest_pp_tps
             est_ppt_ms = e2e_ttft_ms
